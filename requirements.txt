@@ -1,0 +1,11 @@
+streamlit
+python-dotenv
+requests
+pypdf2
+faiss-cpu
+sentence-transformers
+langchain-community
+langchain-text-splitters
+SpeechRecognition
+pyaudio
+gtts
