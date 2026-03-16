@@ -206,7 +206,9 @@ with st.sidebar:
 
         text = get_pdf_text(pdf_docs)
 
-        vector_store = create_vector_store(text)
+        if text:
+            vector_store = create_vector_store(text)
+            st.success("Vector store created successfully!")
 
         st.session_state.vector_store = vector_store
 
