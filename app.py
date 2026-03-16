@@ -3,17 +3,18 @@ import os
 import requests
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-import speech_recognition as sr
 from gtts import gTTS
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
+
 # ---------------- LOAD API ----------------
 
 load_dotenv()
 API_KEY = os.getenv("NVIDIA_API_KEY")
+
 
 # ---------------- PAGE CONFIG ----------------
 
@@ -21,6 +22,7 @@ st.set_page_config(
     page_title="NVIDIA AI PDF Assistant",
     layout="wide"
 )
+
 
 # ---------------- NVIDIA STYLE UI ----------------
 
@@ -62,9 +64,13 @@ padding:10px;
 </style>
 """, unsafe_allow_html=True)
 
+
 # ---------------- HEADER ----------------
 
-st.image("https://upload.wikimedia.org/wikipedia/sco/2/21/Nvidia_logo.svg", width=180)
+st.image(
+"https://upload.wikimedia.org/wikipedia/sco/2/21/Nvidia_logo.svg",
+width=180
+)
 
 st.markdown(
 """
@@ -76,26 +82,36 @@ Chat with your PDFs using AI
 unsafe_allow_html=True
 )
 
-# ---------------- PDF FUNCTIONS ----------------
+
+# ---------------- PDF TEXT EXTRACTION ----------------
 
 def get_pdf_text(pdf_docs):
+
     text = ""
 
     for pdf in pdf_docs:
+
         try:
+
             reader = PdfReader(pdf)
 
             for page in reader.pages:
+
                 page_text = page.extract_text()
+
                 if page_text:
+
                     text += page_text
 
-        except Exception as e:
-            st.error("Invalid or corrupted PDF file. Please upload a valid PDF.")
+        except:
+
+            st.error("Invalid or corrupted PDF file.")
             return ""
 
     return text
 
+
+# ---------------- VECTOR STORE ----------------
 
 def create_vector_store(text):
 
@@ -107,17 +123,18 @@ def create_vector_store(text):
     chunks = splitter.split_text(text)
 
     embeddings = HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2"
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
     vector_store = FAISS.from_texts(
-        chunks,
+        texts=chunks,
         embedding=embeddings
     )
 
     return vector_store
 
-# ---------------- NVIDIA AI ----------------
+
+# ---------------- NVIDIA AI CALL ----------------
 
 def ask_ai(context, question):
 
@@ -149,36 +166,20 @@ Question:
         "max_tokens": 1024
     }
 
-    response = requests.post(url, headers=headers, json=payload)
+    response = requests.post(
+        url,
+        headers=headers,
+        json=payload
+    )
 
     result = response.json()
 
     try:
         return result["choices"][0]["message"]["content"]
-    except:
-        return str(result)
-
-# ---------------- VOICE INPUT ----------------
-
-def speech_to_text():
-
-    recognizer = sr.Recognizer()
-
-    with sr.Microphone() as source:
-
-        st.info("Listening...")
-
-        audio = recognizer.listen(source)
-
-    try:
-
-        text = recognizer.recognize_google(audio)
-
-        return text
 
     except:
+        return "AI response error."
 
-        return "Could not understand audio"
 
 # ---------------- TEXT TO SPEECH ----------------
 
@@ -192,6 +193,7 @@ def text_to_speech(text):
 
     return file
 
+
 # ---------------- SIDEBAR ----------------
 
 with st.sidebar:
@@ -200,20 +202,28 @@ with st.sidebar:
 
     pdf_docs = st.file_uploader(
         "Upload PDF files",
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        type="pdf"
     )
 
     if st.button("Process PDFs"):
 
-        text = get_pdf_text(pdf_docs)
+        if pdf_docs:
 
-        if text:
-            vector_store = create_vector_store(text)
-            st.success("Vector store created successfully!")
+            text = get_pdf_text(pdf_docs)
 
-        st.session_state.vector_store = vector_store
+            if text:
 
-        st.success("PDF Ready!")
+                vector_store = create_vector_store(text)
+
+                st.session_state.vector_store = vector_store
+
+                st.success("PDF processed successfully!")
+
+        else:
+
+            st.warning("Please upload a PDF first.")
+
 
 # ---------------- CHAT MEMORY ----------------
 
@@ -221,22 +231,20 @@ if "messages" not in st.session_state:
 
     st.session_state.messages = []
 
+
 # Display chat history
+
 for message in st.session_state.messages:
 
     with st.chat_message(message["role"]):
 
         st.markdown(message["content"])
 
+
 # ---------------- USER INPUT ----------------
 
 question = st.chat_input("Ask something about the PDF")
 
-if st.button("🎤 Speak"):
-
-    question = speech_to_text()
-
-    st.write("You said:", question)
 
 # ---------------- AI RESPONSE ----------------
 
