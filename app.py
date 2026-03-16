@@ -79,19 +79,20 @@ unsafe_allow_html=True
 # ---------------- PDF FUNCTIONS ----------------
 
 def get_pdf_text(pdf_docs):
-
     text = ""
 
     for pdf in pdf_docs:
+        try:
+            reader = PdfReader(pdf)
 
-        reader = PdfReader(pdf)
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text
 
-        for page in reader.pages:
-
-            content = page.extract_text()
-
-            if content:
-                text += content
+        except Exception as e:
+            st.error("Invalid or corrupted PDF file. Please upload a valid PDF.")
+            return ""
 
     return text
 
