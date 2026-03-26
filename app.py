@@ -1,285 +1,266 @@
 import streamlit as st
-import os
 import requests
+import os
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-from gtts import gTTS
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
+# FAISS
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
 
-# ---------------- LOAD API ----------------
+import speech_recognition as sr
+from gtts import gTTS
+import tempfile
+
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
+
+# ---------------- CONFIG ---------------- #
+st.set_page_config(page_title="PDF Chat AI", layout="wide")
 
 load_dotenv()
 API_KEY = os.getenv("NVIDIA_API_KEY")
 
+URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-# ---------------- PAGE CONFIG ----------------
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-st.set_page_config(
-    page_title="NVIDIA AI PDF Assistant",
-    layout="wide"
-)
-
-
-# ---------------- NVIDIA STYLE UI ----------------
-
-st.markdown("""
-<style>
-
-.stApp {
-background-color:#0e0e0e;
-color:white;
-}
-
-h1 {
-color:#76B900;
-text-align:center;
-}
-
-section[data-testid="stSidebar"] {
-background-color:#111111;
-}
-
-.stButton>button {
-background-color:#76B900;
-color:black;
-border-radius:8px;
-border:none;
-font-weight:bold;
-}
-
-.stButton>button:hover {
-background-color:#5fa300;
-}
-
-[data-testid="stChatMessage"] {
-background-color:#1a1a1a;
-border-radius:10px;
-padding:10px;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-
-# ---------------- HEADER ----------------
-
-st.image(
-"https://upload.wikimedia.org/wikipedia/sco/2/21/Nvidia_logo.svg",
-width=180
-)
-
-st.markdown(
-"""
-<h1>⚡ NVIDIA AI PDF Assistant</h1>
-<p style='text-align:center;color:gray'>
-Chat with your PDFs using AI
-</p>
-""",
-unsafe_allow_html=True
-)
-
-
-# ---------------- PDF TEXT EXTRACTION ----------------
-
-def get_pdf_text(pdf_docs):
-
-    text = ""
+# ---------------- PDF PROCESSING ---------------- #
+def get_pdf_text_with_page(pdf_docs):
+    texts = []
 
     for pdf in pdf_docs:
+        reader = PdfReader(pdf)
+        for i, page in enumerate(reader.pages):
+            page_text = page.extract_text() or ""
+            texts.append({
+                "text": page_text,
+                "page": i + 1
+            })
 
-        try:
-
-            reader = PdfReader(pdf)
-
-            for page in reader.pages:
-
-                page_text = page.extract_text()
-
-                if page_text:
-
-                    text += page_text
-
-        except:
-
-            st.error("Invalid or corrupted PDF file.")
-            return ""
-
-    return text
+    return texts
 
 
-# ---------------- VECTOR STORE ----------------
-
-def create_vector_store(text):
-
+def get_text_chunks(pages):
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
+        chunk_size=1500,
+        chunk_overlap=300
     )
 
-    chunks = splitter.split_text(text)
+    chunks = []
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+    for page in pages:
+        split_texts = splitter.split_text(page["text"])
+        for chunk in split_texts:
+            chunks.append({
+                "text": chunk,
+                "page": page["page"]
+            })
 
-    vector_store = FAISS.from_texts(
-        texts=chunks,
-        embedding=embeddings
-    )
-
-    return vector_store
+    return chunks
 
 
-# ---------------- NVIDIA AI CALL ----------------
+# ---------------- FAISS ---------------- #
+def create_vector_store(chunks):
+    texts = [c["text"] for c in chunks]
 
+    embeddings = embed_model.encode(texts)
+    dim = embeddings.shape[1]
+
+    index = faiss.IndexFlatL2(dim)
+    index.add(np.array(embeddings))
+
+    return index, chunks
+
+
+def search_chunks(question, index, chunks, k=20):
+    q_embedding = embed_model.encode([question])
+    distances, indices = index.search(np.array(q_embedding), k)
+
+    results = []
+    for i in indices[0]:
+        results.append(chunks[i])
+
+    return results
+
+
+# ---------------- NVIDIA AI ---------------- #
 def ask_ai(context, question):
-
-    prompt = f"""
-You are an AI assistant.
-
-Use the context below to answer the question.
-
-Context:
-{context}
-
-Question:
-{question}
-"""
-
-    url = "https://integrate.api.nvidia.com/v1/chat/completions"
-
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
 
     payload = {
-        "model": "qwen/qwen3.5-397b-a17b",
+        "model": "meta/llama3-70b-instruct",
         "messages": [
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert assistant. "
+                    "Give very detailed, structured answers. "
+                    "Explain step-by-step. "
+                    "Use headings, bullet points, and examples. "
+                    "Do not give short answers."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"Context:\n{context}\n\nQuestion:\n{question}"
+            }
         ],
-        "temperature": 0.5,
-        "max_tokens": 1024
+        "temperature": 0.6,
+        "max_tokens": 3000
     }
 
-    response = requests.post(
-        url,
-        headers=headers,
-        json=payload
-    )
+    response = requests.post(URL, headers=headers, json=payload)
 
-    result = response.json()
+    if response.status_code != 200:
+        return f"Error: {response.text}"
 
     try:
-        return result["choices"][0]["message"]["content"]
-
+        return response.json()["choices"][0]["message"]["content"]
     except:
-        return "AI response error."
+        return response.text
 
 
-# ---------------- TEXT TO SPEECH ----------------
+# ---------------- VOICE ---------------- #
+def get_voice_input():
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        st.info("🎤 Speak now...")
+        audio = r.listen(source)
 
-def text_to_speech(text):
-
-    tts = gTTS(text=text)
-
-    file = "response.mp3"
-
-    tts.save(file)
-
-    return file
+    try:
+        return r.recognize_google(audio)
+    except:
+        st.error("Voice error")
+        return ""
 
 
-# ---------------- SIDEBAR ----------------
+def speak(text):
+    tts = gTTS(text)
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+    tts.save(temp_file.name)
+    return temp_file.name
 
+
+# ---------------- PDF DOWNLOAD ---------------- #
+def create_pdf(text):
+    file_path = "answer.pdf"
+    doc = SimpleDocTemplate(file_path)
+    styles = getSampleStyleSheet()
+
+    content = []
+    for line in text.split("\n"):
+        content.append(Paragraph(line, styles["Normal"]))
+
+    doc.build(content)
+    return file_path
+
+
+# ---------------- SESSION STATE ---------------- #
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "audio_played" not in st.session_state:
+    st.session_state.audio_played = False
+
+
+# ---------------- UI ---------------- #
+st.title("📄 Chat with PDFs NVIDIA AI")
+
+# Sidebar
 with st.sidebar:
-
-    st.header("📄 Upload PDFs")
-
-    pdf_docs = st.file_uploader(
-        "Upload PDF files",
-        accept_multiple_files=True,
-        type="pdf"
-    )
+    pdf_docs = st.file_uploader("Upload PDFs", accept_multiple_files=True)
 
     if st.button("Process PDFs"):
-
         if pdf_docs:
+            with st.spinner("Processing..."):
+                pages = get_pdf_text_with_page(pdf_docs)
+                chunks = get_text_chunks(pages)
 
-            text = get_pdf_text(pdf_docs)
+                index, chunks = create_vector_store(chunks)
 
-            if text:
+                st.session_state.index = index
+                st.session_state.chunks = chunks
 
-                vector_store = create_vector_store(text)
-
-                st.session_state.vector_store = vector_store
-
-                st.success("PDF processed successfully!")
-
+            st.success("✅ File is Ready!")
         else:
-
-            st.warning("Please upload a PDF first.")
-
-
-# ---------------- CHAT MEMORY ----------------
-
-if "messages" not in st.session_state:
-
-    st.session_state.messages = []
+            st.warning("Upload PDFs")
 
 
-# Display chat history
+# 🎤 Voice
+if st.button("🎤 Speak"):
+    voice_q = get_voice_input()
+    if voice_q:
+        st.session_state.voice_question = voice_q
 
-for message in st.session_state.messages:
+# 💬 Chat input
+question = st.chat_input("Ask from your PDFs")
 
-    with st.chat_message(message["role"]):
-
-        st.markdown(message["content"])
-
-
-# ---------------- USER INPUT ----------------
-
-question = st.chat_input("Ask something about the PDF")
+# Merge voice + text
+if "voice_question" in st.session_state and not question:
+    question = st.session_state.voice_question
+    del st.session_state.voice_question
 
 
-# ---------------- AI RESPONSE ----------------
-
+# ---------------- MAIN LOGIC ---------------- #
 if question:
-
-    st.session_state.messages.append(
-        {"role":"user","content":question}
-    )
-
-    with st.chat_message("user"):
-
-        st.markdown(question)
-
-    if "vector_store" not in st.session_state:
-
-        answer = "Please upload and process a PDF first."
-
+    if "index" not in st.session_state:
+        st.warning("⚠️ Upload PDFs first")
     else:
+        # Save user message
+        st.session_state.chat_history.append(("user", question))
 
-        docs = st.session_state.vector_store.similarity_search(question)
-
-        context = "\n".join(
-            [doc.page_content for doc in docs]
+        relevant_chunks = search_chunks(
+            question,
+            st.session_state.index,
+            st.session_state.chunks,
+            k=20
         )
 
-        answer = ask_ai(context, question)
+        context = " ".join([c["text"] for c in relevant_chunks])
 
-    with st.chat_message("assistant"):
+        # 📄 Collect page numbers
+        pages_used = sorted(set([c["page"] for c in relevant_chunks]))
 
-        st.markdown(answer)
+        with st.spinner("Thinking..."):
+            answer = ask_ai(context, question)
 
-        audio = text_to_speech(answer)
+        # Add page reference
+        page_info = f"\n\n📄 Sources: Pages {', '.join(map(str, pages_used))}"
+        final_answer = answer + page_info
 
-        st.audio(audio)
+        # Save answer
+        st.session_state.chat_history.append(("assistant", final_answer))
 
-    st.session_state.messages.append(
-        {"role":"assistant","content":answer}
-    )
+        # Voice
+        audio_file = speak(answer)
+        st.session_state.audio_file = audio_file
+        st.session_state.audio_played = False
+
+
+# ---------------- DISPLAY CHAT ---------------- #
+for role, msg in st.session_state.chat_history:
+    with st.chat_message(role):
+        st.write(msg)
+
+
+# 🔊 Play audio once
+if "audio_file" in st.session_state and not st.session_state.audio_played:
+    st.audio(st.session_state.audio_file)
+    st.session_state.audio_played = True
+
+
+# 📥 Downloads
+if st.session_state.chat_history:
+    last_answer = st.session_state.chat_history[-1][1]
+
+    st.download_button("📥 Download TXT", last_answer, "answer.txt")
+
+    pdf = create_pdf(last_answer)
+    with open(pdf, "rb") as f:
+        st.download_button("📥 Download PDF", f, "answer.pdf")
