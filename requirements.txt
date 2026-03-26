@@ -9,3 +9,4 @@ langchain-text-splitters
 SpeechRecognition
 gtts
 reportlab
+pyaudio
